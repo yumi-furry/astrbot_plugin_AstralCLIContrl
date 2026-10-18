@@ -1,0 +1,277 @@
+{
+  "base_url": {
+    "description": "AstralGame-Cli 服务地址",
+    "type": "string",
+    "default": "http://127.0.0.1:8080",
+    "hint": "例如 http://192.168.31.163:1786；插件会在此地址后拼接 /api 下的业务接口。"
+  },
+  "username": {
+    "description": "鉴权用户名",
+    "type": "string",
+    "default": "",
+    "hint": "采用 wiki 推荐的 HTTP Basic Auth。用户名留空表示服务端未开启鉴权。"
+  },
+  "password": {
+    "description": "鉴权密码",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "与用户名组成 Basic Auth 头（Authorization: Basic base64(username:password)）。"
+  },
+  "timeout": {
+    "description": "请求超时（秒）",
+    "type": "int",
+    "default": 10,
+    "slider": { "min": 1, "max": 120, "step": 1 },
+    "hint": "单次 REST 请求的最长等待时间。"
+  },
+  "log_tail_default": {
+    "description": "日志默认行数",
+    "type": "int",
+    "default": 100,
+    "hint": "/astral logs 未指定行数时使用的默认值。服务端上限为 800，超出将按 800 处理。"
+  },
+  "audit_tail_default": {
+    "description": "审计默认条数",
+    "type": "int",
+    "default": 20,
+    "hint": "/astral audit 未指定条数时使用的默认值。服务端上限为 500，超出将按 500 处理。"
+  },
+  "max_output_chars": {
+    "description": "单条消息最大字符数",
+    "type": "int",
+    "default": 3000,
+    "hint": "日志等长文本超过该长度时截断，并提示已显示条数与总条数。"
+  },
+  "messages": {
+    "description": "可配置回复文案",
+    "type": "object",
+    "hint": "所有回复内容均可在此自定义；{xxx} 为占位符，具体占位符列表见插件 README。",
+    "items": {
+      "msg_no_permission": {
+        "description": "权限不足",
+        "type": "text",
+        "default": "权限不足：该指令仅限 AstrBot 管理员使用。"
+      },
+      "msg_error": {
+        "description": "通用失败",
+        "type": "text",
+        "default": "操作失败：{error}",
+        "hint": "占位符：{error}"
+      },
+      "msg_unauthorized": {
+        "description": "鉴权失败（401）",
+        "type": "text",
+        "default": "鉴权失败（401）：请检查插件配置中的用户名 / 密码。"
+      },
+      "msg_room_empty": {
+        "description": "未在房间中",
+        "type": "text",
+        "default": "当前未在房间中。"
+      },
+      "msg_bad_invite": {
+        "description": "邀请码无效",
+        "type": "text",
+        "default": "邀请码为空或格式无效，请提供短码 / 完整邀请链接 / AG1. 离线串。"
+      },
+      "msg_truncated": {
+        "description": "内容截断提示",
+        "type": "text",
+        "default": "\n…内容过长已截断（显示 {shown} 条，共 {total} 条）",
+        "hint": "占位符：{shown}、{total}"
+      },
+      "status": {
+        "description": "/astral status 回复",
+        "type": "text",
+        "default": "AstralGame 节点状态\n运行中：{running}\n当前房间：{room_line}\n节点信息：{node_line}",
+        "hint": "占位符：{running}、{room_line}、{node_line}"
+      },
+      "status_running_yes": {
+        "description": "运行中：是",
+        "type": "text",
+        "default": "是"
+      },
+      "status_running_no": {
+        "description": "运行中：否",
+        "type": "text",
+        "default": "否"
+      },
+      "status_unknown": {
+        "description": "无法确定",
+        "type": "text",
+        "default": "未知"
+      },
+      "room_none_short": {
+        "description": "无房间（短）",
+        "type": "text",
+        "default": "无"
+      },
+      "room_summary": {
+        "description": "房间摘要（状态行内）",
+        "type": "text",
+        "default": "{game_name}（房间码 {short_code}）",
+        "hint": "占位符：{game_name}、{short_code}"
+      },
+      "room": {
+        "description": "/astral room 回复",
+        "type": "text",
+        "default": "当前房间\n房主：{is_host}\n游戏：{game_name}（{game_id}）\n房间名：{display_name}\n房间码：{short_code}\n邀请链接：{share_url}\n离线邀请串：{offline_invite}\n中继节点：\n{peers}",
+        "hint": "占位符：{is_host}、{game_name}、{game_id}、{display_name}、{short_code}、{share_url}、{offline_invite}、{peers}"
+      },
+      "room_peers_none": {
+        "description": "中继节点：无",
+        "type": "text",
+        "default": "  （无）"
+      },
+      "room_peer_item": {
+        "description": "中继节点条目",
+        "type": "text",
+        "default": "  {uri}",
+        "hint": "占位符：{uri}"
+      },
+      "logs": {
+        "description": "/astral logs 回复",
+        "type": "text",
+        "default": "AstralGame 运行日志（最近 {count} 行）\n{lines}",
+        "hint": "占位符：{count}、{lines}"
+      },
+      "logs_none": {
+        "description": "日志为空",
+        "type": "text",
+        "default": "AstralGame 运行日志：暂无日志。"
+      },
+      "start_ok": {
+        "description": "/astral start 成功",
+        "type": "text",
+        "default": "启动成功。{status_line}",
+        "hint": "占位符：{status_line}"
+      },
+      "start_fail": {
+        "description": "/astral start 失败",
+        "type": "text",
+        "default": "启动失败：{error}",
+        "hint": "占位符：{error}"
+      },
+      "stop_ok": {
+        "description": "/astral stop 成功",
+        "type": "text",
+        "default": "已停止服务。"
+      },
+      "stop_fail": {
+        "description": "/astral stop 失败",
+        "type": "text",
+        "default": "停止失败：{error}",
+        "hint": "占位符：{error}"
+      },
+      "restart_ok": {
+        "description": "/astral restart 成功",
+        "type": "text",
+        "default": "重启成功。{status_line}",
+        "hint": "占位符：{status_line}"
+      },
+      "restart_fail": {
+        "description": "/astral restart 失败",
+        "type": "text",
+        "default": "重启失败：{error}",
+        "hint": "占位符：{error}"
+      },
+      "create_ok": {
+        "description": "/astral create 成功",
+        "type": "text",
+        "default": "房间创建成功\n游戏：{game_name}（{game_id}）\n房间码：{short_code}\n分享链接：{share_url}\n离线邀请串：{offline_invite}",
+        "hint": "占位符：{game_name}、{game_id}、{short_code}、{share_url}、{offline_invite}"
+      },
+      "create_fail": {
+        "description": "/astral create 失败",
+        "type": "text",
+        "default": "房间创建失败：{error}",
+        "hint": "占位符：{error}"
+      },
+      "invite_ok": {
+        "description": "/astral invite 回复",
+        "type": "text",
+        "default": "当前房间分享链接：{share_url}\n房间码：{short_code}",
+        "hint": "占位符：{share_url}、{short_code}"
+      },
+      "join_ok": {
+        "description": "/astral join 成功",
+        "type": "text",
+        "default": "已加入房间\n游戏：{game_name}（{game_id}）\n房间码：{short_code}\n分享链接：{share_url}",
+        "hint": "占位符：{game_name}、{game_id}、{short_code}、{share_url}"
+      },
+      "join_fail": {
+        "description": "/astral join 失败",
+        "type": "text",
+        "default": "加入房间失败：{error}",
+        "hint": "占位符：{error}"
+      },
+      "leave_ok": {
+        "description": "/astral leave 成功",
+        "type": "text",
+        "default": "已离开房间，房间已关闭。"
+      },
+      "leave_fail": {
+        "description": "/astral leave 失败",
+        "type": "text",
+        "default": "离开房间失败：{error}",
+        "hint": "占位符：{error}"
+      },
+      "servers": {
+        "description": "/astral servers 回复",
+        "type": "text",
+        "default": "中继服务器（共 {count} 个）\n{items}",
+        "hint": "占位符：{count}、{items}"
+      },
+      "servers_none": {
+        "description": "无中继服务器",
+        "type": "text",
+        "default": "暂无已配置的中继服务器。"
+      },
+      "server_item": {
+        "description": "中继服务器条目",
+        "type": "text",
+        "default": "{index}. {name}｜{uri}｜{enabled}",
+        "hint": "占位符：{index}、{name}、{uri}、{enabled}"
+      },
+      "server_enabled_yes": {
+        "description": "启用状态：已启用",
+        "type": "text",
+        "default": "已启用"
+      },
+      "server_enabled_no": {
+        "description": "启用状态：已禁用",
+        "type": "text",
+        "default": "已禁用"
+      },
+      "ping": {
+        "description": "/astral ping 回复",
+        "type": "text",
+        "default": "中继服务器测速（单位 ms，-1 表示失败 / 超时）\n{items}",
+        "hint": "占位符：{items}"
+      },
+      "ping_item": {
+        "description": "测速条目",
+        "type": "text",
+        "default": "{index}. {name}｜{uri}｜{latency}",
+        "hint": "占位符：{index}、{name}、{uri}、{latency}"
+      },
+      "audit": {
+        "description": "/astral audit 回复",
+        "type": "text",
+        "default": "操作记录（最近 {count} 条）\n{items}",
+        "hint": "占位符：{count}、{items}"
+      },
+      "audit_none": {
+        "description": "无操作记录",
+        "type": "text",
+        "default": "暂无操作记录。"
+      },
+      "audit_item": {
+        "description": "操作记录条目",
+        "type": "text",
+        "default": "{time}｜{kind}｜{action}｜{ip}",
+        "hint": "占位符：{time}、{kind}、{action}、{ip}"
+      }
+    }
+  }
+}
