@@ -1,0 +1,2 @@
+# astrbot_plugin_AstralCLIContrl
+AstralCLIContrl，为AstrBot提供基于AstralGame-CLI API对于AstralGame-CLI的调用功能
