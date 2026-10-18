@@ -5,41 +5,47 @@ AstrBot 插件：通过聊天指令远程管理 **AstralGame-Cli** 联机服务�
 - 指令分组：`/astral <子指令>`；同时**独立注册**扁平顶层指令 `/ag<子指令>`（两种写法等价，见下表）。
   - 注：AstrBot 指令别名的完整匹配名 = 父指令名 + 子指令名（见 `CommandFilter.get_complete_command_names`），
     子指令的 `alias` 只能匹配 `/astral ag<子指令>`，无法匹配裸 `/ag<子指令>`，因此扁平入口单独注册。
-- 通道：仅使用 **REST API**（鉴权采用官方 wiki 推荐的 HTTP Basic Auth）。
-- WebSocket 实时推送 / 第三方服务控制指令为**第二阶段**，本版本未启用，扩展说明见文末。
+- 通道：**REST API**（鉴权采用官方 wiki 推荐的 HTTP Basic Auth）+ **WebSocket 第三方服务通道**
+  （`ws://<host>:<port>/api/ws/service?key=<ws_key>&name=&type=`，`ws_key` 鉴权，不走面板账号）。
+  - WS 通道用于实时事件推送，并**优先**下发控制指令；未连通或失败时自动回退 REST。
+  - WS 通道默认关闭，需在配置中开启 `ws_enabled` 并填写 `ws_key`。
 
-> 所有端点、请求方法、请求体字段、响应结构、鉴权方式、房间对象字段、邀请码格式均以 AstralGame-Cli 官方 wiki 为准：
+> 所有端点、请求方法、请求体字段、响应结构、鉴权方式、房间对象字段、邀请码格式、WS 事件与指令协议
+> 均以 AstralGame-Cli 官方 wiki 为准：
 > `wiki/rest-api.md`、`wiki/rooms.md`、`wiki/websocket-events.md`。
 > wiki 未明确之处，代码中以 `# TODO:` 标注假设。
 
 ## 目录结构
 
 ```
-astrbot_plugin_astralgame/          # 放入 AstrBot 的 data/plugins/ 下
-├── main.py                         # 插件主逻辑（13 个指令 + 统一请求封装）
+astrbot_plugin_AstralCLIContrl/     # 放入 AstrBot 的 data/plugins/ 下
+├── main.py                         # 插件主逻辑（14 个指令 + REST/WS 双通道 + 统一请求封装）
 ├── metadata.yaml                   # 插件元信息（AstrBot v4 的元数据来源）
-├── requirements.txt                # 依赖：aiohttp
+├── requirements.txt                # 依赖：aiohttp、websockets
 ├── _conf_schema.json               # 配置项定义（含全部可配置回复文案）
 ├── README.md                       # 本文件
-└── core/                           # 预置模块（本阶段未接线）
+└── core/
     ├── rest_client.py              # REST 客户端（备用封装）
-    ├── ws_client.py                # 第二阶段：第三方服务 WS 客户端
+    ├── ws_client.py                # 第三方服务 WS 客户端（已接线：连接/重连/指令关联/事件回调）
     ├── formatters.py               # 结构化字段归一化辅助
     └── toml_edit.py                # 轻量 TOML 读写
 ```
 
-> 说明：`main.py` 为自包含实现（自带 `_request` 统一封装与渲染逻辑），不依赖 `core/`，
-> 以确保在任何加载方式下都能直接运行。`core/ws_client.py` 预留给第二阶段的 WebSocket 接入。
+> 说明：`main.py` 为自包含实现（自带 `_request` 统一封装与渲染逻辑），仅按文件路径动态加载
+> `core/ws_client.py`（避免与其他插件的 `core` 包重名）。未安装 `websockets` 或 WS 初始化失败时
+> 自动降级为「仅 REST 通道」，不影响其余指令。
 
 ## 安装
 
-1. 将插件目录放入 AstrBot 的 `data/plugins/` 下（目录名保持 `astrbot_plugin_astralgame`）。
+1. 将插件目录放入 AstrBot 的 `data/plugins/` 下（目录名保持 `astrbot_plugin_AstralCLIContrl`）。
 2. 在 AstrBot WebUI 的 **插件** 页安装依赖，或手动执行：
    ```bash
    pip install -r requirements.txt
    ```
 3. 在插件卡片点击 **重载插件**，使插件生效。
 4. 打开插件配置，填写 `base_url` 与鉴权凭据（见下一节）。
+5. （可选）如需实时事件推送 / 用 WS 下发控制指令：开启 `ws_enabled`、填写 `ws_key`，并按需配置
+   `ws_push_targets` 与 `ws_push_events`。
 
 > 元数据由 `metadata.yaml` 提供；`main.py` 中的 `@register(...)` 仅为兼容旧版 AstrBot 的写法，
 > 在新版本中导入失败会自动降级为空实现，不影响加载。
@@ -55,6 +61,13 @@ astrbot_plugin_astralgame/          # 放入 AstrBot 的 data/plugins/ 下
 | `log_tail_default` | int | `100` | `/astral logs` 未指定行数时的默认值（服务端上限 800） |
 | `audit_tail_default` | int | `20` | `/astral audit` 未指定条数时的默认值（服务端上限 500） |
 | `max_output_chars` | int | `3000` | 单条消息最大字符数，超过则截断并提示总条数 |
+| `ws_enabled` | bool | `false` | 是否启用 WebSocket 第三方服务通道 |
+| `ws_key` | string | 空 | WS 连接密钥（`/api/ws/service?key=`）；可在面板「设置 → 第三方服务」查看，或 `GET /api/ws/key`（Basic Auth）获取 |
+| `ws_name` | string | `AstrBot` | 连接串 `name` 参数（服务器记录的服务名称） |
+| `ws_type` | string | `AstrBot` | 连接串 `type` 参数（服务类型） |
+| `ws_url` | string | 空 | WS 服务地址；留空则由 `base_url` 推导：`http://host:port → ws://host:port/api/ws/service` |
+| `ws_push_targets` | string | 空 | 事件推送目标会话 `unified_msg_origin` 列表，逗号 / 分号 / 换行分隔；留空则不推送 |
+| `ws_push_events` | string | 见下 | 需要推送的事件类型（逗号分隔），默认 `room.created,room.joined,room.left,server.started,audit` |
 | `messages` | object | 见下 | 全部可配置回复文案 |
 
 鉴权：采用 wiki 推荐的 `Authorization: Basic base64(username:password)`；用户名留空时不发送该头。
@@ -76,6 +89,7 @@ astrbot_plugin_astralgame/          # 放入 AstrBot 的 data/plugins/ 下
 | `/astral servers` | `/agservers` | 普通 | 列出已配置的中继服务器（含启用状态） |
 | `/astral ping` | `/agping` | 普通 | 并发测试各中继节点延迟与可用性 |
 | `/astral audit [条数]` | `/agaudit` | 管理员 | 查询最近操作记录，默认取配置 `audit_tail_default` |
+| `/astral ws` | `/agws` | 普通 | 查看 WebSocket 通道连接状态与推送配置 |
 
 权限校验 API：`AstrMessageEvent.is_admin()`（等价于 `event.role == "admin"`）。
 校验失败回复配置项 `messages.msg_no_permission`（默认「权限不足」）。
@@ -98,6 +112,7 @@ astrbot_plugin_astralgame/          # 放入 AstrBot 的 data/plugins/ 下
 /astral ping
 /astral audit 20
 /astral restart
+/astral ws
 
 # 扁平写法（统一前缀）
 /agstatus
@@ -111,6 +126,7 @@ astrbot_plugin_astralgame/          # 放入 AstrBot 的 data/plugins/ 下
 /agping
 /agaudit 20
 /agrestart
+/agws
 ```
 
 ## 邀请码规范化（`normalize_invite`）
@@ -153,6 +169,13 @@ astrbot_plugin_astralgame/          # 放入 AstrBot 的 data/plugins/ 下
 | `server_enabled_yes` / `server_enabled_no` | — | 启用状态取值文案 |
 | `ping` / `ping_item` | `{items}` / `{index}` `{name}` `{uri}` `{latency}` | 服务器测速 |
 | `audit` / `audit_none` / `audit_item` | `{count}` `{items}` / — / `{time}` `{kind}` `{action}` `{ip}` | 操作记录 |
+| `channel_ws` / `channel_rest` | — | 操作结果末尾的通道标记（默认：WS 提示、REST 为空） |
+| `ws_disabled` / `ws_not_connected` | — | WS 未启用 / 未连接提示 |
+| `ws_status` | `{url}` `{enabled}` `{connected}` `{name}` `{type}` `{last_event}` `{push_events}` | `/astral ws` 回复 |
+| `ws_room_info` / `ws_room_members_none` | `{count}` `{members}` / — | `/astral room` 的成员段 |
+| `ws_room_member_item` | `{hostname}` `{ipv4}` `{latency}` `{loss}` `{conn_type}` | 房间成员条目 |
+| `ws_push` | `{event}` `{detail}` | 通用事件推送文本 |
+| `ws_push_audit` | `{time}` `{kind}` `{action}` `{ip}` | 审计事件推送文本 |
 
 ## 与 wiki 的差异与 TODO
 
@@ -166,16 +189,42 @@ astrbot_plugin_astralgame/          # 放入 AstrBot 的 data/plugins/ 下
 - `/api/logs` 响应字段名（兼容纯数组 / `logs|lines|items` / 纯文本）。
 - 「总行数」：wiki 未定义独立字段，`/astral logs` 的「总行数」以**服务端返回的日志条数**为准。
 
-## 后续扩展（第二阶段：WebSocket 实时通知）
+## WebSocket 通道（第三方服务）
 
-`core/ws_client.py` 已预留 `AstralGame` 第三方服务 WebSocket 客户端（`/api/ws/service?key=<密钥>&name=&type=`，密钥鉴权）。
-第二阶段计划接入：
+已接入 AstralGame-Cli 第三方服务端点（见 `wiki/websocket-events.md`）：
 
-- 连接建立后接收 `snapshot` 与 `hello`，实时订阅 `room.created` / `room.joined` / `room.left` / `server.started` / `audit` 事件，并向指定会话主动推送；
-- 发送控制指令（`get_room_info` / `open` / `close` / `join` / `restart`）——其中控制类指令需服务端开启 `service_control_enabled`；
-- 借助 `get_room_info` 的 `members`（含 `latency_ms` / `loss_rate`）补齐 `/astral room` 的成员列表与延迟展示。
+```
+ws://<host>:<port>/api/ws/service?key=<ws_key>&name=<名称>&type=<类型>
+```
 
-密钥可在面板「设置 → 第三方服务」查看 / 刷新；刷新后旧密钥立即失效。
+- **鉴权**：系统随机密钥 `ws_key`，**不走面板账号**；密钥可在面板「设置 → 第三方服务」查看，
+  或 `GET /api/ws/key`（Basic Auth）获取。手动刷新密钥后旧密钥立即失效、已连接服务被断开。
+- **连接时序**：连接后先收 `hello`（连接 ID / 名称 / 类型 / 初次连接时间），再收 `snapshot`，之后实时推送。
+- **事件推送**：按 `ws_push_events` 白名单，向 `ws_push_targets` 中的每个 `unified_msg_origin`
+  主动发送（`context.send_message`）。默认**不推送** `snapshot` 以免刷屏。
+- **断线重连**：客户端指数退避自动重连（5s 起、封顶 60s），并带 websockets 层心跳（30s ping）。
+
+### 控制指令与通道优先级
+
+WS 可主动下发指令，插件**优先走 WS**；未连接或执行失败（例如服务端未开启
+`service_control_enabled`）时**自动回退 REST**，用户无感知。经 WS 下发的结果末尾会附带
+`channel_ws` 文案标记（可用配置改为空以隐藏）。
+
+| 指令 | WS action | WS 未启用时回退 |
+|---|---|---|
+| `/agstart` | `open`（不带 `game_id`，重放上次配置） | `POST /api/start` |
+| `/agrestart` | `restart` | `POST /api/restart` |
+| `/agcreate <游戏ID> [名称]` | `open`（带 `game_id` / `game_name` / `display_name`） | `POST /api/room/create` |
+| `/agjoin <邀请码>` | `join`（`input`） | `POST /api/room/join` |
+| `/agleave` | `close`（停实例并清空房间） | `POST /api/room/leave` |
+| `/agroom` | `get_room_info`（补齐成员列表 + 实测延迟 / 丢包率 / 连接类型） | 仅 REST 信息 |
+| `/agstop` | —（WS 无对应 action） | `POST /api/stop` |
+
+> 说明：`/agstop` **不映射** WS —— 协议中的 `close` 会额外清空当前房间，与 `/api/stop`
+> 仅停实例的语义不同，为避免行为不一致故仍走 REST。`get_room_info` 为只读指令，
+> **不受** `service_control_enabled` 开关限制；`open` / `close` / `join` / `restart` 需服务端开启该开关。
+
+> 若需调整，可在配置中关闭 `ws_enabled` 完全禁用 WS（退化为纯 REST）。
 
 ## License / 致谢
 

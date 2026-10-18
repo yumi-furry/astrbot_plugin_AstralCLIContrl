@@ -43,6 +43,49 @@
     "default": 3000,
     "hint": "日志等长文本超过该长度时截断，并提示已显示条数与总条数。"
   },
+  "ws_enabled": {
+    "description": "启用 WebSocket 通道",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后插件以第三方服务身份连接 /api/ws/service（ws_key 鉴权），实时接收房间 / 审计事件，并优先用 WS 下发控制指令；未连通时自动回退 REST。"
+  },
+  "ws_key": {
+    "description": "第三方服务连接密钥（ws_key）",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "服务端 config.toml 的 [astral_server].ws_key，或面板「设置 → 第三方服务」查看；亦可用 GET /api/ws/key（Basic Auth）获取。"
+  },
+  "ws_name": {
+    "description": "上报的服务名称（name）",
+    "type": "string",
+    "default": "AstrBot",
+    "hint": "连接串的 name 参数，服务端据此记录在线服务。"
+  },
+  "ws_type": {
+    "description": "上报的服务类型（type）",
+    "type": "string",
+    "default": "AstrBot",
+    "hint": "连接串的 type 参数。"
+  },
+  "ws_url": {
+    "description": "WebSocket 服务地址",
+    "type": "string",
+    "default": "",
+    "hint": "留空则由 base_url 自动推导：http://host:port → ws://host:port/api/ws/service。"
+  },
+  "ws_push_targets": {
+    "description": "事件推送目标会话",
+    "type": "string",
+    "default": "",
+    "hint": "一个或多个 unified_msg_origin（形如 platform_name:message_type:session_id），用逗号 / 分号 / 换行分隔；留空则不推送。"
+  },
+  "ws_push_events": {
+    "description": "需要推送的事件类型",
+    "type": "string",
+    "default": "room.created,room.joined,room.left,server.started,audit",
+    "hint": "逗号分隔；可选 snapshot、hello、server.started、room.created、room.joined、room.left、audit。默认不含 snapshot 以免频繁刷屏。"
+  },
   "messages": {
     "description": "可配置回复文案",
     "type": "object",
@@ -270,6 +313,61 @@
         "description": "操作记录条目",
         "type": "text",
         "default": "{time}｜{kind}｜{action}｜{ip}",
+        "hint": "占位符：{time}、{kind}、{action}、{ip}"
+      },
+      "channel_ws": {
+        "description": "经 WebSocket 下发的标记",
+        "type": "text",
+        "default": "\n（经 WebSocket 通道下发）"
+      },
+      "channel_rest": {
+        "description": "经 REST 下发的标记",
+        "type": "text",
+        "default": ""
+      },
+      "ws_disabled": {
+        "description": "WebSocket 未启用",
+        "type": "text",
+        "default": "WebSocket 通道未启用：请在插件配置中开启 ws_enabled 并填写 ws_key。"
+      },
+      "ws_not_connected": {
+        "description": "WebSocket 未连接",
+        "type": "text",
+        "default": "WebSocket 通道未连接（正在重连，或密钥已失效）。"
+      },
+      "ws_status": {
+        "description": "/astral ws 回复",
+        "type": "text",
+        "default": "WebSocket 通道状态\n地址：{url}\n启用：{enabled}\n连接：{connected}\n服务名称：{name}（{type}）\n最近事件：{last_event}\n推送事件：{push_events}",
+        "hint": "占位符：{url}、{enabled}、{connected}、{name}、{type}、{last_event}、{push_events}"
+      },
+      "ws_room_info": {
+        "description": "房间成员段（get_room_info）",
+        "type": "text",
+        "default": "\n节点成员（共 {count} 个）：\n{members}",
+        "hint": "占位符：{count}、{members}"
+      },
+      "ws_room_member_item": {
+        "description": "房间成员条目",
+        "type": "text",
+        "default": "  {hostname}｜{ipv4}｜{latency} ms｜丢包 {loss}%｜{conn_type}",
+        "hint": "占位符：{hostname}、{ipv4}、{latency}、{loss}、{conn_type}"
+      },
+      "ws_room_members_none": {
+        "description": "房间成员：无",
+        "type": "text",
+        "default": "  （无成员）"
+      },
+      "ws_push": {
+        "description": "事件推送文本",
+        "type": "text",
+        "default": "[AstralGame] {event}\n{detail}",
+        "hint": "占位符：{event}、{detail}"
+      },
+      "ws_push_audit": {
+        "description": "审计事件推送文本",
+        "type": "text",
+        "default": "[AstralGame] 操作记录\n{time}｜{kind}｜{action}｜{ip}",
         "hint": "占位符：{time}、{kind}、{action}、{ip}"
       }
     }

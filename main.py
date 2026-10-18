@@ -9,22 +9,37 @@
           - wiki/websocket-events.md
     * wiki 未明确处一律以 ``# TODO:`` 标注并写明假设，不臆造字段名或端点。
 
-本阶段只实现 REST 通道（鉴权采用 wiki 推荐的 HTTP Basic Auth，便于脚本与机器人调用）。
-WebSocket 实时推送 + 第三方服务控制指令属于第二阶段，见 README「后续扩展」章节。
+REST 通道鉴权采用 wiki 推荐的 HTTP Basic Auth；WebSocket 通道走第三方服务端点
+``/api/ws/service``（``ws_key`` 鉴权，不走面板账号），见 wiki/websocket-events.md：
+
+    * 被动接收 ``snapshot`` / ``server.started`` / ``room.*`` / ``audit`` 事件并推送到指定会话；
+    * 主动下发控制指令 ``get_room_info`` / ``open`` / ``restart`` / ``close`` / ``join``；
+    * 控制类指令默认关闭（服务端 ``service_control_enabled``），失败时自动回退 REST 通道。
+
+映射关系（严格对齐 wiki，未定义的映射不臆造）：
+    * ``/agstart``    → WS ``open``（不带 game_id，重放上次配置）
+    * ``/agrestart``  → WS ``restart``
+    * ``/agcreate``   → WS ``open``（带 game_id / game_name / display_name）
+    * ``/agjoin``     → WS ``join``（``input``）
+    * ``/agleave``    → WS ``close``（停止实例并清空房间，与 REST leave 语义一致）
+    * ``/agroom``     → WS ``get_room_info``（补齐成员列表与延迟）
+    * ``/agstop``     → 仍走 REST：WS 协议无对应 action（``close`` 会额外清空房间，语义不同）
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import re
 import time
-from typing import Any, Iterable, Optional
+from pathlib import Path
+from typing import Any, Callable, Iterable, Optional
 from urllib.parse import parse_qs, urlsplit
 
 import aiohttp
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star
 
 # AstrBot v4 起插件元数据改由 metadata.yaml 提供，@register 已从 astrbot.api.star 移除。
@@ -40,6 +55,31 @@ except ImportError:  # pragma: no cover
             return cls
 
         return _decorator
+
+
+# ===========================================================================
+# WebSocket 客户端加载：按文件路径动态加载 core/ws_client.py
+#   避免以顶层包名 ``core`` 导入，防止与其他 AstrBot 插件的 core 模块重名。
+# ===========================================================================
+
+_WS_CLIENT_PATH = Path(__file__).resolve().parent / "core" / "ws_client.py"
+
+
+def _load_ws_client() -> Any:
+    """按文件路径加载同目录下的 ``core/ws_client.py`` 并返回模块对象。
+
+    Raises:
+        Exception: 文件缺失 / 语法错误 / 依赖缺失（如未安装 websockets）时抛出，
+            由调用方捕获并降级为「仅 REST 通道」。
+    """
+    spec = importlib.util.spec_from_file_location(
+        "astral_cli_contrl_ws_client", _WS_CLIENT_PATH
+    )
+    if spec is None or spec.loader is None:  # pragma: no cover - 文件缺失
+        raise ImportError(f"未找到 WebSocket 客户端模块：{_WS_CLIENT_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 # ===========================================================================
@@ -141,6 +181,20 @@ DEFAULT_MESSAGES: dict[str, str] = {
     "audit": "操作记录（最近 {count} 条）\n{items}",
     "audit_none": "暂无操作记录。",
     "audit_item": "{time}｜{kind}｜{action}｜{ip}",
+    # ---- WebSocket 通道相关文案（与 _conf_schema.json 保持一致）----
+    "channel_ws": "\n（经 WebSocket 通道下发）",
+    "channel_rest": "",
+    "ws_disabled": "WebSocket 通道未启用：请在插件配置中开启 ws_enabled 并填写 ws_key。",
+    "ws_not_connected": "WebSocket 通道未连接（正在重连，或密钥已失效）。",
+    "ws_status": (
+        "WebSocket 通道状态\n地址：{url}\n启用：{enabled}\n连接：{connected}\n"
+        "服务名称：{name}（{type}）\n最近事件：{last_event}\n推送事件：{push_events}"
+    ),
+    "ws_room_info": "\n节点成员（共 {count} 个）：\n{members}",
+    "ws_room_member_item": "  {hostname}｜{ipv4}｜{latency} ms｜丢包 {loss}%｜{conn_type}",
+    "ws_room_members_none": "  （无成员）",
+    "ws_push": "[AstralGame] {event}\n{detail}",
+    "ws_push_audit": "[AstralGame] 操作记录\n{time}｜{kind}｜{action}｜{ip}",
 }
 
 # 服务端接口的硬性上限（见 wiki/rest-api.md 的 /api/logs 与 /api/audit-logs）
@@ -163,7 +217,7 @@ class AstralError(Exception):
         super().__init__(message)
 
 
-@register("Astral_CLI_contrl", "AstralGame", "远程管理 AstralGame-Cli 联机服务", "1.0.0")
+@register("Astral_CLI_contrl", "AstralGame", "远程管理 AstralGame-Cli 联机服务", "1.1.0")
 class AstralCliControl(Star):
     """AstralGame-Cli 远程管理插件。
 
@@ -191,18 +245,58 @@ class AstralCliControl(Star):
         self.max_output_chars: int = max(200, int(self._cfg("max_output_chars", 3000)))
 
         self._session: Optional[aiohttp.ClientSession] = None
+
+        # ---- WebSocket 通道配置（见 wiki/websocket-events.md）----
+        self.ws_enabled: bool = bool(self._cfg("ws_enabled", False))
+        self.ws_key: str = str(self._cfg("ws_key", "") or "")
+        self.ws_name: str = str(self._cfg("ws_name", "AstrBot") or "AstrBot")
+        self.ws_type: str = str(self._cfg("ws_type", "AstrBot") or "AstrBot")
+        self.ws_url_override: str = str(self._cfg("ws_url", "") or "")
+        self.ws_push_targets: list[str] = self._split_targets(
+            self._cfg("ws_push_targets", "")
+        )
+        self.ws_push_events: set[str] = self._split_events(
+            self._cfg(
+                "ws_push_events",
+                "room.created,room.joined,room.left,server.started,audit",
+            )
+        )
+        self._ws: Any = None  # AstralWsClient 实例（延迟创建）
+        self._ws_started: bool = False
+        self._ws_last_event: str = ""
+        self._ws_last_ts: float = 0.0
+
         logger.info(
-            "[Astral_CLI_contrl] 插件已加载，目标服务：%s（鉴权：%s）",
+            "[Astral_CLI_contrl] 插件已加载，目标服务：%s（鉴权：%s，WebSocket：%s）",
             self.base_url,
             "启用" if self.username else "关闭",
+            "启用" if (self.ws_enabled and self.ws_key) else "关闭",
         )
+        # 启动 WS 连接。__init__ 为同步方法，可能不在事件循环中；
+        # 若当前无运行中的循环则跳过，改由首个指令触发惰性连接。
+        if self.ws_enabled and self.ws_key:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                logger.info(
+                    "[Astral_CLI_contrl] 当前无运行中的事件循环，WebSocket 将在首个指令时惰性连接。"
+                )
+            else:
+                self._ensure_ws_started()
 
     async def terminate(self) -> None:
-        """插件被卸载 / 停用时关闭 HTTP 会话，释放连接。"""
+        """插件被卸载 / 停用时关闭 HTTP 会话与 WebSocket 连接。"""
+        if self._ws is not None:
+            try:
+                await self._ws.stop()
+            except Exception as exc:  # noqa: BLE001 - 关闭失败不影响卸载
+                logger.warning("[Astral_CLI_contrl] 关闭 WebSocket 连接失败：%s", exc)
+            self._ws = None
+        self._ws_started = False
         if self._session is not None and not self._session.closed:
             await self._session.close()
         self._session = None
-        logger.info("[Astral_CLI_contrl] 插件已卸载，HTTP 会话已关闭。")
+        logger.info("[Astral_CLI_contrl] 插件已卸载，HTTP 会话与 WebSocket 连接已关闭。")
 
     # -------------------------------------------------------------- 配置 / 文案
 
@@ -298,6 +392,212 @@ class AstralCliControl(Star):
             return json.loads(text)
         except (TypeError, ValueError):
             return text
+
+    # ============================================================== WebSocket 层
+    # 端点与协议严格对齐 wiki/websocket-events.md：
+    #   ws://<host>:<port>/api/ws/service?key=<ws_key>&name=<名称>&type=<类型>
+    # 连接后先收 hello、再收 snapshot，之后实时推送事件；控制指令走 {"id","action"} 帧。
+
+    @staticmethod
+    def _split_targets(raw: Any) -> list[str]:
+        """解析推送目标会话串（逗号 / 分号 / 换行分隔）。"""
+        if not raw:
+            return []
+        parts = re.split(r"[,;\n]+", str(raw))
+        return [p.strip() for p in parts if p.strip()]
+
+    @staticmethod
+    def _split_events(raw: Any) -> set[str]:
+        """解析需要推送的事件类型（逗号分隔）。"""
+        if not raw:
+            return set()
+        return {p.strip() for p in re.split(r"[,;\s]+", str(raw)) if p.strip()}
+
+    def _ws_resolve_url(self) -> str:
+        """确定 WS 服务地址：优先 ``ws_url``，否则由 ``base_url`` 推导。"""
+        if self.ws_url_override:
+            return self.ws_url_override
+        base = self.base_url
+        if base.startswith("https://"):
+            base = "wss://" + base[len("https://") :]
+        elif base.startswith("http://"):
+            base = "ws://" + base[len("http://") :]
+        return base.rstrip("/") + "/api/ws/service"
+
+    def _ensure_ws_started(self) -> None:
+        """惰性创建并启动 WS 客户端（幂等；需存在运行中的事件循环）。"""
+        if self._ws_started or not self.ws_enabled or not self.ws_key:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # 无事件循环，留待下次
+        self._ws_started = True
+        try:
+            module = _load_ws_client()
+            self._ws = module.AstralWsClient(
+                url=self._ws_resolve_url(),
+                key=self.ws_key,
+                name=self.ws_name,
+                service_type=self.ws_type,
+                request_timeout=self.timeout,
+                on_event=self._on_ws_event,
+            )
+            self._ws.start()
+            logger.info(
+                "[Astral_CLI_contrl] WebSocket 通道已启动：%s（name=%s, type=%s）",
+                self._ws_resolve_url(),
+                self.ws_name,
+                self.ws_type,
+            )
+        except Exception as exc:  # noqa: BLE001 - 未安装 websockets / 文件缺失时降级为仅 REST
+            self._ws = None
+            self._ws_started = False
+            logger.warning(
+                "[Astral_CLI_contrl] WebSocket 客户端初始化失败，将仅使用 REST 通道：%s", exc
+            )
+
+    def _ws_ready(self) -> bool:
+        """WS 是否已连接可用。"""
+        return self._ws is not None and bool(getattr(self._ws, "connected", False))
+
+    async def _ws_control(self, action: str, **fields: Any) -> tuple[bool, bool, Any]:
+        """尝试经 WS 下发控制指令。
+
+        Returns:
+            ``(via_ws, ok, payload)``：
+                * ``via_ws=False``：WS 未连接，调用方应回退 REST；
+                * ``via_ws=True, ok=True``：payload 为应答 ``data``；
+                * ``via_ws=True, ok=False``：payload 为服务端错误文本（如未开启
+                  ``service_control_enabled``），调用方通常仍应回退 REST。
+        """
+        self._ensure_ws_started()
+        if not self._ws_ready():
+            return False, False, ""
+        try:
+            data = await self._ws.request(action, **fields)
+            return True, True, data
+        except Exception as exc:  # noqa: BLE001 - 统一回退 REST
+            logger.info(
+                "[Astral_CLI_contrl] WS 指令 %s 失败，将回退 REST：%s", action, exc
+            )
+            return True, False, str(exc)
+
+    def _ws_channel(self, via_ws: bool) -> str:
+        """返回通道标记文案（经 WS 下发时附加提示，经 REST 时默认为空）。"""
+        return self._tpl("channel_ws") if via_ws else self._tpl("channel_rest")
+
+    async def _ws_members_text(self) -> str:
+        """经 WS ``get_room_info`` 获取成员列表（含实测延迟），失败返回空串。"""
+        self._ensure_ws_started()
+        if not self._ws_ready():
+            return ""
+        try:
+            data = await self._ws.request("get_room_info")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("[Astral_CLI_contrl] WS get_room_info 失败：%s", exc)
+            return ""
+        if not isinstance(data, dict):
+            return ""
+        members = data.get("members")
+        if not isinstance(members, list) or not members:
+            return self._tpl(
+                "ws_room_info", count=0, members=self._tpl("ws_room_members_none")
+            )
+        lines: list[str] = []
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            lines.append(
+                self._tpl(
+                    "ws_room_member_item",
+                    hostname=member.get("hostname") or member.get("peer_id") or "-",
+                    ipv4=member.get("ipv4") or "-",
+                    latency=(
+                        member["latency_ms"] if member.get("latency_ms") is not None else "-"
+                    ),
+                    loss=(
+                        member["loss_rate"] if member.get("loss_rate") is not None else "-"
+                    ),
+                    conn_type=member.get("conn_type") or "-",
+                )
+            )
+        return self._tpl("ws_room_info", count=len(lines), members="\n".join(lines))
+
+    async def _on_ws_event(self, msg: dict) -> None:
+        """WS 事件回调：记录最近事件，并按配置推送到目标会话。"""
+        event = str(msg.get("event") or "")
+        if not event:
+            return
+        self._ws_last_event = event
+        self._ws_last_ts = time.time()
+
+        if event == "hello":
+            logger.info("[Astral_CLI_contrl] WS 握手完成：%s", msg)
+            return
+        if event == "result":
+            return  # 指令应答由客户端按 id 关联，不在此处理
+        if not self.ws_push_targets:
+            return
+        if self.ws_push_events and event not in self.ws_push_events:
+            return
+
+        text = self._render_ws_event(event, msg)
+        if not text:
+            return
+        for umo in self.ws_push_targets:
+            try:
+                await self.context.send_message(umo, MessageChain().message(text))
+            except Exception as exc:  # noqa: BLE001 - 单个目标失败不影响其他
+                logger.warning("[Astral_CLI_contrl] 事件推送到 %s 失败：%s", umo, exc)
+
+    def _render_ws_event(self, event: str, msg: dict) -> str:
+        """把 WS 事件消息渲染成推送文本（字段见 wiki 消息格式）。"""
+        if event == "audit":
+            entry = msg.get("entry") if isinstance(msg.get("entry"), dict) else {}
+            return self._tpl(
+                "ws_push_audit",
+                time=self._fmt_ts(entry.get("ts") or msg.get("timestamp")),
+                kind=entry.get("kind") or "-",
+                action=entry.get("action") or "-",
+                ip=entry.get("ip") or "-",
+            )
+        room = msg.get("room") if isinstance(msg.get("room"), dict) else {}
+        if not room:
+            detail = self._tpl("room_none_short")
+        else:
+            detail = self._tpl(
+                "room_summary",
+                game_name=room.get("display_name") or room.get("game_name") or "未知",
+                short_code=room.get("short_code") or self._tpl("room_none_short"),
+            )
+            if msg.get("share_url"):
+                detail += "\n" + str(msg["share_url"])
+        return self._tpl("ws_push", event=event, detail=detail)
+
+    async def _do_ws_status(self) -> str:
+        """查看 WebSocket 通道状态（``/agws``）。"""
+        if not self.ws_enabled or not self.ws_key:
+            return self._tpl("ws_disabled")
+        self._ensure_ws_started()
+        connected = self._ws_ready()
+        last_event = (
+            f"{self._ws_last_event}（{self._fmt_ts(self._ws_last_ts)}）"
+            if self._ws_last_event
+            else "-"
+        )
+        return self._tpl(
+            "ws_status",
+            url=self._ws_resolve_url(),
+            enabled=self._tpl("status_running_yes"),
+            connected=(
+                self._tpl("status_running_yes") if connected else self._tpl("status_running_no")
+            ),
+            name=self.ws_name,
+            type=self.ws_type,
+            last_event=last_event,
+            push_events="，".join(sorted(self.ws_push_events)) or "-",
+        )
 
     # -------------------------------------------------------------- 渲染工具
 
@@ -521,6 +821,7 @@ class AstralCliControl(Star):
 
     async def _do_status(self) -> str:
         """查询服务运行状态：``/api/status`` + ``/api/room/current``。"""
+        self._ensure_ws_started()  # 顺带确保 WS 通道已启动（事件推送依赖它）
         try:
             status = await self._request("GET", "/api/status")
             current = await self._request("GET", "/api/room/current")
@@ -531,7 +832,11 @@ class AstralCliControl(Star):
         return self._tpl("status", running=running, room_line=room_line, node_line=node_line)
 
     async def _do_room(self) -> str:
-        """查询当前房间（房主 / 游戏 / 短码 / 分享链接 / 中继节点）。"""
+        """查询当前房间（房主 / 游戏 / 短码 / 分享链接 / 中继节点）。
+
+        若 WebSocket 通道已连接，额外经 ``get_room_info`` 补齐成员列表（含实测延迟 /
+        丢包率 / 连接类型，见 wiki/websocket-events.md）；未连接则仅输出 REST 信息。
+        """
         try:
             current = await self._request("GET", "/api/room/current")
         except Exception as exc:  # noqa: BLE001
@@ -539,9 +844,9 @@ class AstralCliControl(Star):
         room, share_url = self._split_room(current)
         if not room:
             return self._tpl("msg_room_empty")
-        # TODO: 第二阶段（WebSocket get_room_info）接入后，这里可补齐「成员列表 + 延迟」；
-        #  当前 REST 通道仅能给出 wiki 房间对象中的 peers（中继 / 对等节点端点）。
-        return self._render_room(room, share_url)
+        text = self._render_room(room, share_url)
+        members_text = await self._ws_members_text()
+        return text + members_text if members_text else text
 
     async def _do_logs(self, event: AstrMessageEvent, tail: int) -> str:
         """查询运行日志（默认 ``log_tail_default`` 行，服务端上限 800 行）。
@@ -577,20 +882,31 @@ class AstralCliControl(Star):
         return self._tpl("logs", count=shown, lines=body)
 
     async def _do_start(self, event: AstrMessageEvent) -> str:
-        """启动（或重启）EasyTier 实例。需管理员权限。"""
+        """启动（或重启）EasyTier 实例。需管理员权限。
+
+        优先经 WS ``open``（不带 game_id，重放上次配置）；未连接或失败则回退 REST ``/api/start``。
+        """
         denied = self._guard_admin(event)
         if denied:
             return denied
+        via_ws, ok, _payload = await self._ws_control("open")
+        if via_ws and ok:
+            status_line = await self._brief_status()
+            return self._tpl("start_ok", status_line=status_line) + self._ws_channel(True)
         try:
             # 不携带 TOML 文本：由服务端使用自身配置启动（见 wiki /api/start）
             await self._request("POST", "/api/start")
             status_line = await self._brief_status()
         except Exception as exc:  # noqa: BLE001
             return self._tpl("start_fail", error=self._err_text(exc))
-        return self._tpl("start_ok", status_line=status_line)
+        return self._tpl("start_ok", status_line=status_line) + self._ws_channel(False)
 
     async def _do_stop(self, event: AstrMessageEvent) -> str:
-        """停止当前实例。需管理员权限。"""
+        """停止当前实例。需管理员权限。
+
+        仅走 REST ``/api/stop``：WS 第三方服务协议未定义 ``stop`` action
+        （其 ``close`` 会额外清空当前房间，语义不同，故不映射以免行为不一致）。
+        """
         denied = self._guard_admin(event)
         if denied:
             return denied
@@ -601,16 +917,23 @@ class AstralCliControl(Star):
         return self._tpl("stop_ok")
 
     async def _do_restart(self, event: AstrMessageEvent) -> str:
-        """用最近一次配置重启实例。需管理员权限。"""
+        """用最近一次配置重启实例。需管理员权限。
+
+        优先经 WS ``restart``；未连接或失败则回退 REST ``/api/restart``。
+        """
         denied = self._guard_admin(event)
         if denied:
             return denied
+        via_ws, ok, _payload = await self._ws_control("restart")
+        if via_ws and ok:
+            status_line = await self._brief_status()
+            return self._tpl("restart_ok", status_line=status_line) + self._ws_channel(True)
         try:
             await self._request("POST", "/api/restart")
             status_line = await self._brief_status()
         except Exception as exc:  # noqa: BLE001
             return self._tpl("restart_fail", error=self._err_text(exc))
-        return self._tpl("restart_ok", status_line=status_line)
+        return self._tpl("restart_ok", status_line=status_line) + self._ws_channel(False)
 
     async def _brief_status(self) -> str:
         """操作后返回一条简要状态（失败时静默降级，不影响主流程）。"""
@@ -656,10 +979,13 @@ class AstralCliControl(Star):
         if (name or "").strip():
             payload["display_name"] = name.strip()
 
-        try:
-            data = await self._request("POST", "/api/room/create", json_body=payload)
-        except Exception as exc:  # noqa: BLE001
-            return self._tpl("create_fail", error=self._err_text(exc))
+        # 优先经 WS ``open``（携带 game_id / game_name 走建房流程，见 wiki 指令协议）
+        via_ws, ok, data = await self._ws_control("open", **payload)
+        if not (via_ws and ok):
+            try:
+                data = await self._request("POST", "/api/room/create", json_body=payload)
+            except Exception as exc:  # noqa: BLE001
+                return self._tpl("create_fail", error=self._err_text(exc))
 
         room, share_url = self._split_room(data)
         if not share_url:
@@ -678,7 +1004,7 @@ class AstralCliControl(Star):
             short_code=room.get("short_code") or room.get("offline_invite") or "-",
             share_url=share_url or "-",
             offline_invite=room.get("offline_invite") or "-",
-        )
+        ) + self._ws_channel(via_ws and ok)
 
     @staticmethod
     def _lookup_game_name(catalog: Any, game_id: str) -> str:
@@ -724,17 +1050,22 @@ class AstralCliControl(Star):
         )
 
     async def _do_join(self, invite: str) -> str:
-        """加入房间：自动识别短码 / 完整链接 / AG1. 离线串并规范化后提交。"""
+        """加入房间：自动识别短码 / 完整链接 / AG1. 离线串并规范化后提交。
+
+        优先经 WS ``join``（``input``）；未连接或失败则回退 REST ``/api/room/join``。
+        """
         normalized = normalize_invite(invite or "")
         if not normalized:
             return self._tpl("msg_bad_invite")
-        try:
-            # 请求体字段 input：短码 / 完整链接 / AG1. 离线串三选一（见 wiki/rooms.md）
-            data = await self._request(
-                "POST", "/api/room/join", json_body={"input": normalized}
-            )
-        except Exception as exc:  # noqa: BLE001
-            return self._tpl("join_fail", error=self._err_text(exc))
+        via_ws, ok, data = await self._ws_control("join", input=normalized)
+        if not (via_ws and ok):
+            try:
+                # 请求体字段 input：短码 / 完整链接 / AG1. 离线串三选一（见 wiki/rooms.md）
+                data = await self._request(
+                    "POST", "/api/room/join", json_body={"input": normalized}
+                )
+            except Exception as exc:  # noqa: BLE001
+                return self._tpl("join_fail", error=self._err_text(exc))
         room, share_url = self._split_room(data)
         if not share_url:
             share_url = await self._share_url_from_current()
@@ -744,15 +1075,22 @@ class AstralCliControl(Star):
             game_id=room.get("game_id") or "-",
             short_code=room.get("short_code") or room.get("offline_invite") or "-",
             share_url=share_url or "-",
-        )
+        ) + self._ws_channel(via_ws and ok)
 
     async def _do_leave(self) -> str:
-        """离开房间：停止实例、清空当前房间。"""
+        """离开房间：停止实例、清空当前房间。
+
+        优先经 WS ``close``（语义与 REST ``/api/room/leave`` 一致，均会停实例并清空房间）；
+        未连接或失败则回退 REST。
+        """
+        via_ws, ok, _payload = await self._ws_control("close")
+        if via_ws and ok:
+            return self._tpl("leave_ok") + self._ws_channel(True)
         try:
             await self._request("POST", "/api/room/leave")
         except Exception as exc:  # noqa: BLE001
             return self._tpl("leave_fail", error=self._err_text(exc))
-        return self._tpl("leave_ok")
+        return self._tpl("leave_ok") + self._ws_channel(False)
 
     async def _do_servers(self) -> str:
         """列出已配置的中继服务器（含启用状态）。"""
@@ -999,3 +1337,15 @@ class AstralCliControl(Star):
     async def agaudit(self, event: AstrMessageEvent, tail: int = 0):
         """查询最近操作记录（默认读取配置项 audit_tail_default，上限 500 条）。需管理员权限。"""
         yield event.plain_result(await self._do_audit(event, tail))
+
+    # ---------------------------------------------------------- 12 WebSocket 状态
+
+    @astral.command("ws")
+    async def astral_ws(self, event: AstrMessageEvent):
+        """查看 WebSocket 第三方服务通道的连接状态与推送配置。"""
+        yield event.plain_result(await self._do_ws_status())
+
+    @filter.command("agws")
+    async def agws(self, event: AstrMessageEvent):
+        """查看 WebSocket 第三方服务通道的连接状态与推送配置。"""
+        yield event.plain_result(await self._do_ws_status())
