@@ -3,5 +3,5 @@ display_name: AstralGame-Cli 远程控制
 desc: 通过 AstrBot 远程管理 AstralGame-Cli 联机服务：状态与房间查询、房间创建/邀请/加入/离开、中继服务器测速、操作审计，支持 WebSocket 实时事件推送与控制指令。
 short_desc: AstrBot 远程管理 AstralGame-Cli 联机服务的指令插件（REST + WebSocket）
 version: 1.1.0
-author: AstralGame
+author: 一只炫彩玉米
 astrbot_version: ">=4.0.0"
